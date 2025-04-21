@@ -1,6 +1,7 @@
 {
-  "name": "@sigmasd/fetchSyncViaDeno",
+  "name": "@sigmasd/fetch-sync-via-deno",
   "version": "0.1.0",
   "exports": "./src/mod.ts",
-  "license": "MIT"
+  "license": "MIT",
+  "lock": false
 }
