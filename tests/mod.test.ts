@@ -1,3 +1,4 @@
+// fetchSyncViaDeno/tests/mod.test.ts
 import {
   assert,
   assertEquals,
@@ -14,6 +15,9 @@ const urlSuccess = `${BASE_URL}/get`;
 const urlDelay = `${BASE_URL}/delay/1`;
 const urlNotFound = `${BASE_URL}/status/404`;
 const urlServerError = `${BASE_URL}/status/500`;
+const urlPost = `${BASE_URL}/post`; // Added for POST testing
+const urlHeaders = `${BASE_URL}/headers`; // Added for headers testing
+const urlEcho = `${BASE_URL}/echo`; // Added to echo back request info
 const urlBadDomain = "https://nonexistent-domain-abcdefghijklmnop.test";
 
 // --- Test Server Worker Management ---
@@ -129,6 +133,92 @@ Deno.test("fetchSyncViaDeno Test Suite", async (t) => {
       assertEquals(result.body, "Delayed by 1s");
     });
 
+    // NEW TEST: POST request with JSON body
+    await t.step("should handle POST request with JSON body", () => {
+      console.log("Test Step: Testing POST request with JSON body...");
+      const testData = {
+        name: "Test User",
+        email: "test@example.com",
+        timestamp: Date.now(),
+      };
+
+      const result = fetchSyncViaDeno(urlPost, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(testData),
+      });
+
+      console.log("Test Step: POST request test - Done.");
+
+      assertEquals(result.error, null, "Error should be null on POST success");
+      assertEquals(result.status, 200);
+      assertEquals(result.ok, true);
+      assertExists(result.body);
+
+      // Parse the response to verify the server received our data correctly
+      const responseData = JSON.parse(result.body!);
+      assertEquals(responseData.receivedData, testData);
+      assertEquals(responseData.method, "POST");
+      assertEquals(responseData.contentType, "application/json");
+    });
+
+    // NEW TEST: Custom headers
+    await t.step("should send custom headers correctly", () => {
+      console.log("Test Step: Testing custom headers...");
+      const customHeaders = {
+        "X-Custom-Header-1": "value1",
+        "X-Custom-Header-2": "value2",
+        "Authorization": "Bearer test_token",
+      };
+
+      const result = fetchSyncViaDeno(urlHeaders, {
+        headers: customHeaders,
+      });
+
+      console.log("Test Step: Custom headers test - Done.");
+
+      assertEquals(result.error, null, "Error should be null on success");
+      assertEquals(result.status, 200);
+      assertEquals(result.ok, true);
+      assertExists(result.body);
+
+      // Parse the response which should contain the headers we sent
+      const responseData = JSON.parse(result.body!);
+
+      // Check that our custom headers were received correctly
+      Object.entries(customHeaders).forEach(([key, value]) => {
+        assertEquals(responseData.headers[key.toLowerCase()], value);
+      });
+    });
+
+    // NEW TEST: Different HTTP methods
+    await t.step("should handle different HTTP methods", () => {
+      console.log("Test Step: Testing HTTP methods...");
+
+      // Test PUT method
+      const putResult = fetchSyncViaDeno(urlEcho, {
+        method: "PUT",
+        body: "test put data",
+      });
+
+      assertEquals(putResult.error, null);
+      assertEquals(putResult.status, 200);
+      const putData = JSON.parse(putResult.body!);
+      assertEquals(putData.method, "PUT");
+
+      // Test DELETE method
+      const deleteResult = fetchSyncViaDeno(urlEcho, {
+        method: "DELETE",
+      });
+
+      assertEquals(deleteResult.error, null);
+      assertEquals(deleteResult.status, 200);
+      const deleteData = JSON.parse(deleteResult.body!);
+      assertEquals(deleteData.method, "DELETE");
+
+      console.log("Test Step: HTTP methods test - Done.");
+    });
+
     await t.step("should handle client error (404 Not Found)", () => {
       console.log("Test Step: Fetching 404 URL...");
       const result = fetchSyncViaDeno(urlNotFound);
@@ -176,42 +266,6 @@ Deno.test("fetchSyncViaDeno Test Suite", async (t) => {
       assertEquals(result.ok, false);
       assertEquals(result.body, null);
       assertEquals(result.headers, {});
-    });
-
-    await t.step("should handle worker script error (no URL provided)", () => {
-      console.log("Test Step: Testing worker script error...");
-      // This test calls the *fetch worker* directly, not the test server worker
-      const fetchWorkerScriptPath = import.meta.resolve("../src/mod.worker.ts");
-      const denoExecutable = Deno.execPath();
-      const command = new Deno.Command(denoExecutable, {
-        args: [
-          "run",
-          fetchWorkerScriptPath,
-        ],
-        stdout: "piped",
-        stderr: "piped",
-      });
-      const output = command.outputSync();
-      const stdoutText = new TextDecoder().decode(output.stdout);
-      const stderrText = new TextDecoder().decode(output.stderr);
-      console.log("Test Step: Worker script error test - Done.");
-
-      assertEquals(output.code, 1, "Worker should exit with code 1 if no URL");
-      assertStringIncludes(stderrText, "Usage: deno run");
-
-      assertExists(stdoutText);
-      try {
-        // deno-lint-ignore no-explicit-any
-        const result: any = JSON.parse(stdoutText);
-        assertEquals(result.ok, false);
-        assertEquals(result.status, null);
-        assertEquals(
-          result.error,
-          "Usage: deno run --allow-net fetch_worker.ts <url>",
-        );
-      } catch (e) {
-        fail(`Failed to parse worker stdout JSON: ${e}`);
-      }
     });
   } finally {
     // Teardown: Stop the server worker

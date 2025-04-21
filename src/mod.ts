@@ -2,7 +2,7 @@
  * # Fetch Sync Via Deno
  *
  * Provides a synchronous-like fetch implementation for Deno by spawning a
- * separate Deno process for each request.
+ * separate Deno process for each request. Accepts standard `RequestInit` options.
  *
  * This module offers a workaround for specific scenarios where true
  * asynchronous operations are not feasible. However, it comes with significant
@@ -11,6 +11,8 @@
  *   until the subprocess completes the network request.
  * - **Performance Overhead:** Spawning a new process for each fetch request incurs
  *   substantial overhead compared to the native asynchronous `fetch`.
+ * - **Body Handling:** Request bodies are serialized as part of the input JSON,
+ *   which may be inefficient for very large bodies.
  *
  * **Use this module with extreme caution.** Prefer the standard asynchronous
  * `fetch` API whenever possible. This synchronous approach should only be
@@ -20,21 +22,30 @@
  *
  * @example
  * ```ts
- * import { fetchSyncViaDeno } from "./mod.ts";
+ * import { fetchSyncViaDeno } from "jsr:@sigmasd/fetch-sync-via-deno";
  *
- * // Warning: This blocks!
- * const result = fetchSyncViaDeno("https://api.github.com/users/denoland");
+ * // Simple GET
+ * const getResult = fetchSyncViaDeno("https://httpbin.org/get");
+ * console.log("GET Status:", getResult.status);
  *
- * if (result.ok && result.body) {
- *   const data = JSON.parse(result.body);
- *   console.log("GitHub User:", data.login);
- *   console.log("Headers:", result.headers);
+ * // POST with JSON body
+ * const postResult = fetchSyncViaDeno("https://httpbin.org/post", {
+ *   method: "POST",
+ *   headers: { "Content-Type": "application/json" },
+ *   body: JSON.stringify({ message: "Hello from sync fetch!" }),
+ * });
+ *
+ * if (postResult.ok && postResult.body) {
+ *   console.log("POST Response Body:", JSON.parse(postResult.body).json);
  * } else {
- *   console.error(`Fetch failed: ${result.error || result.statusText}`);
+ *   console.error(`POST failed: ${postResult.error || postResult.statusText}`);
  * }
  * ```
  * @module
  */
+
+// Import Node.js child_process module for spawnSync
+import { spawnSync } from "node:child_process";
 
 // Re-define the expected structure from the worker
 /**
@@ -57,9 +68,20 @@ export interface FetchResult {
 }
 
 /**
+ * Represents the data structure passed to the worker script via stdin.
+ * @internal
+ */
+interface WorkerInput {
+  url: string;
+  options: RequestInit;
+}
+
+/**
  * Performs a synchronous-like fetch by spawning a separate Deno process.
  *
  * @param url The URL to fetch.
+ * @param options Standard `RequestInit` options (method, headers, body, etc.).
+ *                Note: Request bodies are serialized and passed via stdin.
  * @returns An object containing the fetch result or error information.
  *
  * @warning This function is **synchronous** and **blocks** the Deno event loop
@@ -68,75 +90,102 @@ export interface FetchResult {
  *          Use with extreme caution and only when standard asynchronous `fetch`
  *          is not viable for your specific use case.
  */
-export function fetchSyncViaDeno(url: string): FetchResult {
-  const workerScriptPath = import.meta.resolve("./mod.worker.ts"); // Relative path to the worker script
+export function fetchSyncViaDeno(
+  url: string,
+  options: RequestInit = {}, // Accept options, default to empty object
+): FetchResult {
+  const workerScriptPath = import.meta.resolve("./mod.worker.ts");
+  const requestDesc = `${options.method || "GET"} ${url}`;
   console.warn(
-    `Executing synchronous fetch via Deno subprocess for ${url}. This WILL block.`,
+    `Executing synchronous fetch via Deno subprocess for ${requestDesc}. This WILL block.`,
   );
 
   try {
-    const denoExecutable = Deno.execPath(); // Get path to current Deno executable
+    const denoExecutable = Deno.execPath();
 
-    // Prepare the command to run the worker script
-    const command = new Deno.Command(denoExecutable, {
-      args: [
+    // Prepare the input data for the worker
+    const workerInput: WorkerInput = {
+      url: url,
+      options: options, // Pass provided options
+    };
+    const workerInputJson = JSON.stringify(workerInput);
+
+    // Use Node.js spawnSync to execute the process synchronously
+    // and pipe the input JSON through stdin
+    const spawnResult = spawnSync(
+      denoExecutable,
+      [
         "run",
-        "--allow-net", // Worker needs net access
-        "--no-check", // Skip type-checking for the worker for faster startup
+        "--allow-net", // Worker needs net access for the fetch
         workerScriptPath, // The script to run
-        url, // Pass the URL as an argument
       ],
-      stdout: "piped", // Capture the worker's standard output (where it prints JSON)
-      stderr: "piped", // Capture the worker's standard error
-      // Note: We don't pipe stdin as the worker doesn't read it.
-    });
+      {
+        input: workerInputJson, // Pass the JSON directly as stdin input
+        encoding: "utf8", // Use UTF-8 encoding for input/output text
+        timeout: 30000, // Optional: Set timeout (30s) to prevent infinite blocking
+        maxBuffer: 1024 * 1024, // Optional: Set max buffer size (1MB) for stdout/stderr
+      },
+    );
 
-    // Execute the command synchronously
-    const output = command.outputSync();
+    // Process spawnSync result
+    const stdoutText = spawnResult.stdout || "";
+    const stderrText = spawnResult.stderr || "";
+    const exitCode = spawnResult.status || 0;
 
-    const stdoutText = new TextDecoder().decode(output.stdout);
-    const stderrText = new TextDecoder().decode(output.stderr);
-
-    // Log any errors from the child process's stderr for debugging,
-    // filtering out common noisy warnings if desired.
-    const filteredStderr = stderrText.split("\n").filter((line) =>
-      !line.includes("Warning The `--unstable` flag is deprecated") && // Example filter
-      !line.includes("Check file:") // Example filter for "--no-check" related noise
+    // Log any errors from the child process's stderr for debugging
+    // deno-lint-ignore no-explicit-any
+    const filteredStderr = stderrText.split("\n").filter((line: any) =>
+      !line.includes("Warning The `--unstable` flag is deprecated") &&
+      !line.includes("Check file:") &&
+      !line.includes("Download") && !line.includes("Compile")
     ).join("\n").trim();
+
     if (filteredStderr) {
-      console.error(`Subprocess stderr (${url}):\n${filteredStderr}`);
+      console.error(`Subprocess stderr (${requestDesc}):\n${filteredStderr}`);
     }
 
-    // --- Process the output ---
+    // Handle subprocess error cases
+    if (spawnResult.error) {
+      // Spawn itself failed (e.g., timeout, killed, etc.)
+      const errorDetail = spawnResult.error instanceof Error
+        ? spawnResult.error.message
+        : String(spawnResult.error);
 
-    // Priority 1: Try parsing stdout, as the worker might have successfully
-    // captured an error (like network error) and reported it via JSON.
+      return {
+        status: null,
+        statusText: null,
+        ok: false,
+        headers: {},
+        body: null,
+        error: `Failed to execute subprocess: ${errorDetail}`,
+      };
+    }
+
+    // Parse the JSON result from stdout
     let parsedResult: FetchResult | null = null;
     if (stdoutText) {
       try {
         parsedResult = JSON.parse(stdoutText);
       } catch (parseError) {
-        // If parsing fails, we'll construct an error result below based on exit code/stderr.
         console.error(
-          `Failed to parse subprocess stdout JSON for ${url}: ${parseError}\nRaw stdout: ${stdoutText}`,
+          `Failed to parse subprocess stdout JSON for ${requestDesc}: ${parseError}\nRaw stdout: ${stdoutText}`,
         );
       }
     }
 
-    // Priority 2: Check the subprocess exit code.
-    if (output.code === 0) {
-      // Process exited successfully.
+    // Check the subprocess exit code
+    if (exitCode === 0) {
+      // Process exited successfully
       if (parsedResult) {
-        // Successfully parsed the result from stdout.
-        // The worker might still have reported an internal error via the JSON structure (e.g., failed to read body).
+        // Successfully parsed the result from stdout
         if (parsedResult.error) {
           console.warn(
-            `Worker script reported an error for ${url}: ${parsedResult.error}`,
+            `Worker script reported an error for ${requestDesc}: ${parsedResult.error}`,
           );
         }
         return parsedResult;
       } else {
-        // Exited successfully, but stdout wasn't valid JSON. This is unexpected.
+        // Exited successfully, but stdout wasn't valid JSON
         return {
           status: null,
           statusText: null,
@@ -144,51 +193,53 @@ export function fetchSyncViaDeno(url: string): FetchResult {
           headers: {},
           body: stdoutText, // Include raw output
           error:
-            `Subprocess for ${url} exited successfully (code 0) but produced non-JSON stdout. Stderr: ${
+            `Subprocess for ${requestDesc} exited successfully (code 0) but produced non-JSON stdout. Stderr: ${
               filteredStderr || "(empty)"
             }`,
         };
       }
     } else {
-      // Process exited with an error code.
+      // Process exited with an error code
       if (parsedResult && parsedResult.error) {
-        // Worker exited with error code AND reported an error via JSON. Use the JSON error.
-        // This is typical for fetch errors caught within the worker (e.g., network error).
+        // Worker exited non-zero AND reported an error via JSON
         return parsedResult;
       } else {
-        // Worker exited with error code, but either didn't produce valid JSON
-        // or the JSON didn't contain an explicit error message.
-        // Construct a generic error based on exit code and stderr.
+        // Worker exited non-zero, but didn't have valid JSON error
         const baseErrorMsg =
-          `Subprocess for ${url} failed with code ${output.code}.`;
+          `Subprocess for ${requestDesc} failed with code ${exitCode}.`;
         const extraInfo = filteredStderr
           ? ` Stderr: ${filteredStderr}`
-          : (stdoutText && !parsedResult ? ` Raw stdout: ${stdoutText}` : ""); // Include raw stdout if parsing failed
+          : (stdoutText && !parsedResult ? ` Raw stdout: ${stdoutText}` : "");
 
         return {
-          status: null,
-          statusText: null,
+          status: parsedResult?.status ?? null,
+          statusText: parsedResult?.statusText ?? null,
           ok: false,
-          headers: parsedResult?.headers ?? {}, // Keep headers if we parsed them but it wasn't an error structure
-          body: parsedResult?.body ?? null, // Keep body if we parsed it but it wasn't an error structure
+          headers: parsedResult?.headers ?? {},
+          body: parsedResult?.body ?? null,
           error: baseErrorMsg + extraInfo,
         };
       }
     }
-  } catch (spawnError) {
-    // Error spawning the Deno process itself (e.g., executable not found, permissions)
-    console.error(`Failed to spawn Deno subprocess for ${url}:`, spawnError);
+  } catch (error) {
+    // Error in the overall process
+    console.error(
+      `Failed to handle synchronous fetch for ${requestDesc}:`,
+      error,
+    );
     return {
       status: null,
       statusText: null,
       ok: false,
       headers: {},
       body: null,
-      error: `Failed to spawn Deno subprocess: ${
-        spawnError instanceof Error ? spawnError.message : String(spawnError)
+      error: `Internal error in fetchSyncViaDeno: ${
+        error instanceof Error ? error.message : String(error)
       }`,
     };
   } finally {
-    console.warn(`Synchronous fetch via Deno subprocess finished for ${url}.`);
+    console.warn(
+      `Synchronous fetch via Deno subprocess finished for ${requestDesc}.`,
+    );
   }
 }

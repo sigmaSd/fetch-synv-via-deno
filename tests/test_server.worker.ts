@@ -1,3 +1,4 @@
+// fetchSyncViaDeno/tests/test_server.worker.ts
 /// <reference lib="webworker" />
 // This worker runs the HTTP server independently.
 
@@ -41,15 +42,15 @@ self.onmessage = async (event: MessageEvent) => {
       },
       onError: (error) => {
         console.error("Test Server Worker Error:", error);
-        // Optionally signal error back, though AddrInUse is caught below
         return new Response("Server error", { status: 500 });
       },
     }, async (req) => {
-      // --- Same Request Handling Logic ---
       const url = new URL(req.url);
       console.log(
         `Test Server Worker Received: ${req.method} ${url.pathname}`,
       );
+
+      // Handle original routes
       if (url.pathname === "/get") {
         return new Response(JSON.stringify({ message: "Success" }), {
           status: 200,
@@ -59,6 +60,8 @@ self.onmessage = async (event: MessageEvent) => {
           },
         });
       }
+
+      // Handle delay routes
       if (url.pathname.startsWith("/delay/")) {
         const delaySeconds = parseInt(url.pathname.split("/")[2] || "1", 10);
         await new Promise((resolve) =>
@@ -66,10 +69,80 @@ self.onmessage = async (event: MessageEvent) => {
         );
         return new Response(`Delayed by ${delaySeconds}s`, { status: 200 });
       }
+
+      // NEW ROUTE: Handle POST route
+      if (url.pathname === "/post") {
+        try {
+          // Get content type to handle differently based on type
+          const contentType = req.headers.get("Content-Type") || "";
+          let receivedData;
+
+          // Handle based on content type
+          if (contentType.includes("application/json")) {
+            receivedData = await req.json();
+          } else {
+            receivedData = await req.text();
+          }
+
+          // Return response with info about what we received
+          return new Response(
+            JSON.stringify({
+              receivedData: receivedData,
+              method: req.method,
+              contentType: contentType,
+            }),
+            {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            },
+          );
+        } catch (error) {
+          return new Response(JSON.stringify({ error: String(error) }), {
+            status: 400,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+      }
+
+      // NEW ROUTE: Echo back headers
+      if (url.pathname === "/headers") {
+        // Collect all headers into an object
+        const headers: Record<string, string> = {};
+        req.headers.forEach((value, key) => {
+          headers[key] = value;
+        });
+
+        return new Response(JSON.stringify({ headers }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      // NEW ROUTE: Echo back general request info
+      if (url.pathname === "/echo") {
+        const bodyText = await req.text(); // Get the request body
+
+        return new Response(
+          JSON.stringify({
+            method: req.method,
+            url: req.url,
+            headers: Object.fromEntries(req.headers.entries()),
+            bodyText: bodyText,
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      // Handle status code routes
       if (url.pathname.startsWith("/status/")) {
         const status = parseInt(url.pathname.split("/")[2] || "404", 10);
         return new Response(`Responding with ${status}`, { status });
       }
+
+      // Default 404 response
       return new Response("Not Found", { status: 404 });
     }).finished;
 

@@ -1,105 +1,134 @@
-// Define the structure of the output JSON
+// fetchSyncViaDeno/src/mod.worker.ts
+import { readAll } from "jsr:@std/io/read-all"; // Using std library for reading stdin
+
+// Define the structure of the data expected from stdin
+interface WorkerInput {
+  url: string;
+  options: RequestInit; // Standard fetch options
+}
+
+// Define the structure of the output JSON sent to stdout
 interface WorkerOutput {
   status: number | null;
   statusText: string | null;
   ok: boolean;
-  headers: Record<string, string>; // Include headers
-  body: string | null; // Body as text
-  error: string | null; // Error message if fetch failed
+  headers: Record<string, string>;
+  body: string | null;
+  error: string | null;
 }
 
 async function main() {
-  // Expect the URL as the first argument
-  if (Deno.args.length === 0 || !Deno.args[0]) {
-    const errorResult: WorkerOutput = {
+  let input: WorkerInput;
+  let url: string;
+  let options: RequestInit;
+  let output: WorkerOutput;
+  let response: Response | undefined; // Keep response accessible in catch blocks
+
+  try {
+    // 1. Read all data from stdin
+    const stdinBytes = await readAll(Deno.stdin);
+
+    // 2. Decode the bytes to a string (assuming UTF-8)
+    const stdinText = new TextDecoder().decode(stdinBytes);
+
+    // 3. Parse the JSON string into the WorkerInput structure
+    input = JSON.parse(stdinText);
+    url = input.url;
+    options = input.options;
+
+    // --- Input validation (basic) ---
+    if (typeof url !== "string" || !url) {
+      throw new Error("Invalid or missing 'url' in stdin JSON.");
+    }
+    if (typeof options !== "object" || options === null) {
+      throw new Error("Invalid or missing 'options' object in stdin JSON.");
+    }
+    // Note: More specific validation of 'options' could be added if needed
+  } catch (inputError) {
+    // Handle errors during stdin reading, decoding, or parsing
+    const errorMsg = `Worker: Failed to process stdin: ${
+      inputError instanceof Error ? inputError.message : String(inputError)
+    }`;
+    console.error(errorMsg); // Log detail to stderr
+    output = {
       status: null,
       statusText: null,
       ok: false,
       headers: {},
       body: null,
-      error: "Usage: deno run --allow-net fetch_worker.ts <url>",
+      error: errorMsg, // Report the input processing error
     };
-    // Log usage error message to stderr (for potential debugging)
-    console.error(errorResult.error);
-    // Output the error structure as JSON to stdout (for the parent process)
-    console.log(JSON.stringify(errorResult));
-    Deno.exit(1); // Exit with failure code
-    return; // Explicit return for clarity
+    console.log(JSON.stringify(output));
+    Deno.exit(1);
+    return;
   }
 
-  const url = Deno.args[0];
-  let output: WorkerOutput;
-  let response: Response | undefined; // Define response here to access it in catch block if needed
+  // --- Proceed with fetch using the parsed input ---
+  const requestDesc = `${options.method || "GET"} ${url}`; // For logging
 
   try {
-    // Perform the asynchronous fetch operation
-    response = await fetch(url);
+    // 4. Perform the asynchronous fetch operation using parsed url and options
+    response = await fetch(url, options);
 
-    // Convert Headers object to a simple Record<string, string> for JSON serialization
-    // Do this *before* reading body, as we might want headers even if body fails
+    // 5. Convert Headers object to a simple Record<string, string>
     const headers: Record<string, string> = {};
     response.headers.forEach((value, key) => {
       headers[key] = value;
     });
 
-    // Read the response body as text.
-    // Note: This assumes text-based content. Binary content would need different handling (e.g., base64).
+    // 6. Read the response body as text.
     let body: string | null = null;
     try {
-      // Use try-catch here because .text() can fail (e.g., large body, network interrupt during read, non-text content)
       body = await response.text();
     } catch (bodyError) {
       console.error(
-        `Worker: Error reading response body for ${url}: ${bodyError}`,
+        `Worker: Error reading response body for ${requestDesc}: ${bodyError}`,
       );
-      // Still return status and headers, but report the body reading error
       output = {
         status: response.status,
         statusText: response.statusText,
         ok: response.ok,
-        headers: headers, // Return headers we successfully got
+        headers: headers, // Return headers even if body fails
         body: null,
         error: `Failed to read response body: ${
           bodyError instanceof Error ? bodyError.message : String(bodyError)
         }`,
       };
       console.log(JSON.stringify(output));
-      // Exit with failure because we couldn't fully process the response
-      // Parent might still consider status/headers useful depending on the use case.
+      // Exit non-zero as we couldn't fully process the expected response
       Deno.exit(1);
       return;
     }
 
-    // Prepare the success output structure (even for 4xx/5xx responses)
+    // 7. Prepare the success output structure
     output = {
       status: response.status,
       statusText: response.statusText,
       ok: response.ok,
       headers: headers,
       body: body,
-      error: null, // No fetch or body read error occurred
+      error: null, // No fetch or body read error
     };
 
-    // Output the result structure as JSON to stdout
+    // 8. Output the result structure as JSON to stdout
     console.log(JSON.stringify(output));
-    Deno.exit(0); // Exit with success code
+    Deno.exit(0); // Success
   } catch (fetchError) {
-    // An error occurred during the fetch call itself (e.g., network error, DNS resolution failure)
-    console.error(`Worker: Fetch failed for ${url}: ${fetchError}`); // Log detailed error to worker's stderr
+    // 9. Handle errors during the fetch call itself
+    const errorMsg = fetchError instanceof Error
+      ? `${fetchError.name}: ${fetchError.message}`
+      : String(fetchError);
+    console.error(`Worker: Fetch failed for ${requestDesc}: ${errorMsg}`); // Log detailed error to stderr
     output = {
-      status: response?.status ?? null, // Include status if response object exists partially
+      status: response?.status ?? null, // Include status if response partially exists
       statusText: response?.statusText ?? null,
-      ok: false, // Fetch failed or partially failed
-      headers: {}, // Headers might be unreliable or non-existent
+      ok: false, // Fetch failed
+      headers: {}, // Headers might be unreliable
       body: null,
-      // Format error message for the parent process
-      error: fetchError instanceof Error
-        ? `${fetchError.name}: ${fetchError.message}` // e.g., "TypeError: error sending request"
-        : String(fetchError), // Fallback for non-Error objects
+      error: `Fetch failed: ${errorMsg}`, // Report fetch error
     };
-    // Output the error structure as JSON to stdout
     console.log(JSON.stringify(output));
-    Deno.exit(1); // Exit with failure code
+    Deno.exit(1); // Failure
   }
 }
 
