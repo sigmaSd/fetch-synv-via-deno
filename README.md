@@ -1,7 +1,7 @@
 # Fetch Sync Via Deno
 
 Provides a synchronous-like fetch implementation for Deno by spawning a separate
-Deno process for each request.
+Deno process for each request. Accepts standard `RequestInit` options.
 
 This module offers a workaround for specific scenarios where true asynchronous
 operations are not feasible. However, it comes with significant drawbacks:
@@ -10,6 +10,8 @@ operations are not feasible. However, it comes with significant drawbacks:
   until the subprocess completes the network request.
 - **Performance Overhead:** Spawning a new process for each fetch request incurs
   substantial overhead compared to the native asynchronous `fetch`.
+- **Body Handling:** Request bodies are serialized as part of the input JSON,
+  which may be inefficient for very large bodies.
 
 **Use this module with extreme caution.** Prefer the standard asynchronous
 `fetch` API whenever possible. This synchronous approach should only be
@@ -22,16 +24,22 @@ acceptable.
 **Example 1**
 
 ```ts
-import { fetchSyncViaDeno } from "./mod.ts";
+import { fetchSyncViaDeno } from "jsr:@sigmasd/fetch-sync-via-deno";
 
-// Warning: This blocks!
-const result = fetchSyncViaDeno("https://api.github.com/users/denoland");
+// Simple GET
+const getResult = fetchSyncViaDeno("https://httpbin.org/get");
+console.log("GET Status:", getResult.status);
 
-if (result.ok && result.body) {
-  const data = JSON.parse(result.body);
-  console.log("GitHub User:", data.login);
-  console.log("Headers:", result.headers);
+// POST with JSON body
+const postResult = fetchSyncViaDeno("https://httpbin.org/post", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ message: "Hello from sync fetch!" }),
+});
+
+if (postResult.ok && postResult.body) {
+  console.log("POST Response Body:", JSON.parse(postResult.body).json);
 } else {
-  console.error(`Fetch failed: ${result.error || result.statusText}`);
+  console.error(`POST failed: ${postResult.error || postResult.statusText}`);
 }
 ```
